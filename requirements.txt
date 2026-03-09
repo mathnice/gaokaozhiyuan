@@ -5,4 +5,4 @@ pandas>=2.0.0
 scikit-learn>=1.2.0
 xgboost>=1.7.0
 gunicorn>=21.0.0
-dashscope>=1.14.0
+

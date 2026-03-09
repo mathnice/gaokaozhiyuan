@@ -155,11 +155,17 @@ def calculate_tag_with_prob(user_rank: Optional[int], major_data: Dict) -> Tuple
 # 初始化数据（应用启动时执行一次）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+import threading
 ALL_MAJORS: List[Dict] = []
+_data_lock = threading.Lock()
+_data_ready = False
 
 def init_data():
-    global ALL_MAJORS
-    print("正在加载并处理数据...")
+    global ALL_MAJORS, _data_ready
+    with _data_lock:
+        if _data_ready:
+            return
+        print("正在加载并处理数据...")
     df, raw_df = load_and_preprocess_data()
     df = feature_engineering(df)
     important_features = lasso_feature_selection(df)
@@ -184,6 +190,7 @@ def init_data():
             "SF211": int(row.get('SF211', 0)),
         }
         ALL_MAJORS.append(rec)
+        _data_ready = True
     print(f"数据初始化完成，共 {len(ALL_MAJORS)} 条专业记录")
 
 
@@ -206,6 +213,10 @@ def index():
     return send_from_directory("static", "index.html")
 
 
+@app.route("/api/health")
+def health():
+    return jsonify({"ok": True, "records": len(ALL_MAJORS)})
+
 @app.route("/api/login", methods=["POST"])
 def login():
     body = request.json or {}
@@ -219,18 +230,21 @@ def login():
 
 @app.route("/api/regions", methods=["GET"])
 def get_regions():
+    init_data()
     regions = sorted(set(m["region"] for m in ALL_MAJORS))
     return jsonify(regions)
 
 
 @app.route("/api/majors_list", methods=["GET"])
 def get_majors_list():
+    init_data()
     majors = sorted(set(m["major"] for m in ALL_MAJORS))
     return jsonify(majors)
 
 
 @app.route("/api/search", methods=["POST"])
 def search():
+    init_data()
     """
     请求体:
     {
@@ -496,8 +510,6 @@ def ai_analyze():
 # 启动
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# 初始化数据（gunicorn 直接导入模块时也会执行）
-init_data()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
