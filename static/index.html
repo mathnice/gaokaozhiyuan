@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>高考志愿模拟填报系统 · Web版</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════
+     登录遮罩
+══════════════════════════════════════════════ -->
+<div id="loginOverlay" class="overlay">
+  <div class="login-card">
+    <div class="login-logo">🎓</div>
+    <h2>高考志愿模拟填报系统</h2>
+    <p class="login-sub">请先登录以继续使用</p>
+    <div class="form-group">
+      <label>用户名</label>
+      <input id="loginUser" type="text" placeholder="输入用户名" autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input id="loginPass" type="password" placeholder="输入密码" autocomplete="current-password">
+    </div>
+    <div class="login-hint">测试账号：guest/guest &nbsp;|&nbsp; vip/vip &nbsp;|&nbsp; dev/dev</div>
+    <button id="loginBtn" class="btn btn-primary btn-block">登 录</button>
+    <div id="loginError" class="login-error"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     主界面
+══════════════════════════════════════════════ -->
+<div id="mainApp" class="app-layout hidden">
+
+  <!-- 侧边栏 -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-icon">🎓</span>
+      <div class="brand-info">
+        <span class="brand-title">志愿模拟填报系统</span>
+        <span class="brand-version">Web 版 &middot; 2026</span>
+      </div>
+    </div>
+    <div class="sidebar-divider"></div>
+    <div class="avatar" id="avatarEl">👤</div>
+    <div class="username" id="usernameEl">guest</div>
+    <div class="user-badge" id="userBadge">游客</div>
+    <div class="sidebar-spacer"></div>
+    <button class="sidebar-btn" id="switchUserBtn" title="切换账号">⚙️<br><small>切换</small></button>
+  </aside>
+
+  <!-- 主内容区 -->
+  <main class="main-content">
+
+    <!-- ──── 左侧面板 ──── -->
+    <section class="panel left-panel">
+      <div class="panel-title">🔍 志愿查询</div>
+
+      <!-- 筛选卡片 -->
+      <div class="filter-card">
+        <div class="filter-row">
+          <span class="filter-label">📊 我的排名</span>
+          <input id="rankInput" type="number" min="1" max="999999" placeholder="输入省级排名" class="rank-input">
+        </div>
+        <div class="filter-row">
+          <span class="filter-label">📍 意向地区</span>
+          <button class="btn btn-sm btn-blue" id="regionBtn">选择地区…</button>
+          <span id="regionLabel" class="sel-summary">未选择</span>
+        </div>
+        <div class="filter-row">
+          <span class="filter-label">🎓 意向专业</span>
+          <button class="btn btn-sm btn-blue" id="majorBtn">选择专业…</button>
+          <span id="majorLabel" class="sel-summary">未选择</span>
+        </div>
+        <div class="filter-row filter-actions">
+          <button class="btn btn-sm btn-ghost" id="searchBtn">🔍 搜索</button>
+          <button class="btn btn-sm btn-ghost" id="advFilterBtn">🔎 高级筛选</button>
+          <button class="btn btn-sm btn-ghost" id="sortBtn">🔀 排序</button>
+        </div>
+      </div>
+
+      <!-- 结果列表 -->
+      <div class="result-header">
+        <span id="resultCount">共 0 条结果</span>
+        <small>拖拽条目到右侧方案中</small>
+      </div>
+      <div id="resultList" class="result-list"></div>
+    </section>
+
+    <!-- ──── 右侧面板 ──── -->
+    <section class="panel right-panel">
+      <div class="panel-title">📋 我的方案</div>
+
+      <!-- 方案标签页 -->
+      <div class="tabs-wrapper">
+        <div id="tabBar" class="tab-bar"></div>
+        <button class="tab-add-btn" id="addTabBtn" title="新建方案">＋</button>
+      </div>
+      <div id="schemeContainer" class="scheme-container">
+        <!-- 方案列表在这里渲染 -->
+      </div>
+
+      <!-- 右侧操作栏 -->
+      <div class="scheme-actions">
+        <button class="btn btn-sm btn-orange" id="undoBtn">↩ 撤回</button>
+        <button class="btn btn-sm btn-blue" id="exportBtn">📤 导出 CSV</button>
+        <button class="btn btn-sm btn-purple" id="aiBtn">🤖 AI 分析</button>
+      </div>
+
+      <!-- 冲稳保统计 -->
+      <div id="statsBar" class="stats-bar">
+        <span class="stat-chip chip-chong">冲 <b id="countChong">0</b></span>
+        <span class="stat-chip chip-wen">稳 <b id="countWen">0</b></span>
+        <span class="stat-chip chip-bao">保 <b id="countBao">0</b></span>
+        <span class="stat-chip chip-total">共 <b id="countTotal">0/20</b> 个志愿</span>
+      </div>
+      <div class="stats-progress">
+        <div class="sp-chong" id="barChong" style="width:0%"></div>
+        <div class="sp-wen"   id="barWen"   style="width:0%"></div>
+        <div class="sp-bao"   id="barBao"   style="width:0%"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- 状态栏 -->
+  <div id="statusBar" class="status-bar">就绪</div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     通用模态框
+══════════════════════════════════════════════ -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box" id="modalBox">
+    <div class="modal-header">
+      <span id="modalTitle">标题</span>
+      <button class="modal-close" id="modalClose">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-footer" id="modalFooter"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     AI 分析对话框
+══════════════════════════════════════════════ -->
+<div id="aiModal" class="modal hidden">
+  <div class="modal-box modal-wide">
+    <div class="modal-header">
+      <span>🤖 AI 志愿分析</span>
+      <button class="modal-close" id="aiModalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="aiResult" class="ai-result">正在分析中，请稍候…</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm btn-blue" id="aiCopyBtn">📋 复制结果</button>
+      <button class="btn btn-sm" id="aiCloseBtn">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     高级筛选模态框
+══════════════════════════════════════════════ -->
+<div id="filterModal" class="modal hidden">
+  <div class="modal-box" style="width:660px; max-width:96vw;">
+    <div class="modal-header">
+      <span>🔎 高级筛选</span>
+      <button class="modal-close" id="filterModalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="filterConditions"></div>
+      <button class="btn btn-sm btn-blue" id="addConditionBtn" style="margin-top:8px">➕ 添加条件</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm btn-orange" id="clearConditionsBtn">🔄 清除</button>
+      <button class="btn btn-sm btn-primary" id="applyFilterBtn">✓ 应用</button>
+      <button class="btn btn-sm" id="cancelFilterBtn">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     排序模态框
+══════════════════════════════════════════════ -->
+<div id="sortModal" class="modal hidden">
+  <div class="modal-box" style="width:520px; max-width:96vw;">
+    <div class="modal-header">
+      <span>🔀 自定义排序</span>
+      <button class="modal-close" id="sortModalClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="sortConditions"></div>
+      <button class="btn btn-sm btn-blue" id="addSortBtn" style="margin-top:8px">➕ 添加排序条件</button>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm btn-primary" id="applySortBtn">✓ 应用</button>
+      <button class="btn btn-sm" id="cancelSortBtn">取消</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
