@@ -9,7 +9,9 @@ import csv
 import io
 import datetime
 import threading
-from typing import List, Dict, Optional, Tuple
+import math
+from dataclasses import dataclass
+from typing import List, Dict, Optional, Tuple, Any
 
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = BASE_DIR
@@ -17,10 +19,9 @@ sys.path.insert(0, BASE_DIR)
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LassoCV
 from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
-from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import LabelEncoder
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -32,85 +33,254 @@ CORS(app)
 # 机器学习流程
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def load_and_preprocess_data():
-    csv_path = os.path.join(PARENT_DIR, "专业录取分数统计表.csv")
-    df_raw = pd.read_csv(csv_path, quotechar='"', encoding='utf-8')
-    df = df_raw.copy()
-    expected = ['ZYMC','SZD','SFSYL','SF985','SF211',
-                'JHRS_3','JHRS_2','JHRS_1','SJRS_3','SJRS_2','SJRS_1',
-                'XX_Med_3','XX_Med_2','XX_Med_1',
-                'ZY_Max_3','ZY_Max_2','ZY_Max_1',
-                'ZY_Min_3','ZY_Min_2','ZY_Min_1','CS','NX','YJ']
-    for col in expected:
-        if col not in df.columns:    df[col] = np.nan
-        if col not in df_raw.columns: df_raw[col] = np.nan
-    numeric = [c for c in expected if c not in ('ZYMC','SZD','SFSYL','SF985','SF211')]
-    for col in numeric:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-    df[numeric] = SimpleImputer(strategy='median').fit_transform(df[numeric])
-    return df, df_raw
+@dataclass
+class ModelMetrics:
+    name: str
+    rmse: float
+    mae: float
+    r2: float
 
-def feature_engineering(df):
-    df['ZY_Min_avg']        = df[['ZY_Min_1','ZY_Min_2','ZY_Min_3']].mean(axis=1)
-    df['ZY_Min_trend']      = (df['ZY_Min_3']-df['ZY_Min_1'])/(df['ZY_Min_1']+1e-6)
-    df['ZY_Min_volatility'] = df[['ZY_Min_1','ZY_Min_2','ZY_Min_3']].std(axis=1)/(df['ZY_Min_avg']+1e-6)
-    df['JHRS_avg']          = df[['JHRS_1','JHRS_2','JHRS_3']].mean(axis=1)
-    df['JHRS_trend']        = (df['JHRS_3']-df['JHRS_1'])/(df['JHRS_1']+1e-6)
-    for i in (1,2,3):
-        df[f'LR_{i}']          = df[f'SJRS_{i}']/(df[f'JHRS_{i}']+1e-6)
-        df[f'Competition_{i}'] = df[f'XX_Med_{i}']/(df[f'ZY_Min_{i}']+1e-6)
-    df['LR_avg']          = df[['LR_1','LR_2','LR_3']].mean(axis=1)
-    df['Competition_avg'] = df[['Competition_1','Competition_2','Competition_3']].mean(axis=1)
-    for c in ('SFSYL','SF985','SF211'):
-        df[c] = df[c].fillna(0).astype(int)
-    return df
 
-def lasso_feature_selection(df):
-    feature_cols = [
-        'JHRS_1','JHRS_2','JHRS_3','SJRS_1','SJRS_2','SJRS_3',
-        'XX_Med_1','XX_Med_2','XX_Med_3','ZY_Max_1','ZY_Max_2','ZY_Max_3',
-        'ZY_Min_1','ZY_Min_2','ZY_Min_3','CS','NX','YJ',
-        'ZY_Min_avg','ZY_Min_trend','ZY_Min_volatility',
-        'JHRS_avg','JHRS_trend','LR_avg','Competition_avg',
-        'SFSYL','SF985','SF211'
-    ]
-    lasso = LassoCV(cv=5, random_state=42, max_iter=10000)
-    lasso.fit(df[feature_cols], df['ZY_Min_3'])
-    return [feature_cols[i] for i in range(len(feature_cols)) if lasso.coef_[i] != 0]
+class RankForecastPipeline:
+    def __init__(self, seed: int = 42):
+        self.seed = seed
+        self.le_zymc = LabelEncoder()
+        self.le_szd = LabelEncoder()
+        self.model_1 = self._new_model()
+        self.model_2 = self._new_model()
+        self.model_3 = self._new_model()
+        self.model_4 = self._new_model()
+        self.model_5 = self._new_model()
 
-def xgboost_prediction(df, feats):
-    X_tr, X_te, y_tr, _ = train_test_split(df[feats], df['ZY_Min_3'], test_size=0.2, random_state=42)
-    model = XGBRegressor(n_estimators=100, max_depth=6, learning_rate=0.1,
-                         subsample=0.8, colsample_bytree=0.8, random_state=42)
-    model.fit(X_tr, y_tr)
-    return model
+    @staticmethod
+    def _new_model() -> XGBRegressor:
+        return XGBRegressor(
+            n_estimators=500,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective="reg:squarederror",
+            random_state=42,
+            reg_lambda=1.0,
+            min_child_weight=1,
+            n_jobs=-1,
+        )
 
-def predict_next_year(df, model, feats):
-    df['ZY_Min_4'] = model.predict(df[feats])
-    df['ZY_Min_4'] = np.maximum(df['ZY_Min_4'], 0)
-    df['ZY_Min_4'] = (0.4*df['ZY_Min_3'] + 0.3*df['ZY_Min_2'] +
-                      0.2*df['ZY_Min_1'] + 0.1*df['ZY_Min_4'])
-    return df
+    @staticmethod
+    def _check_columns(df: pd.DataFrame, required_cols: List[str]) -> None:
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"缺少必要列: {missing}")
+
+    def _prepare_data(self, csv_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        df_raw = pd.read_csv(csv_path)
+        required_cols = [
+            "ZYMC", "SZD", "SFSYL", "SF985", "SF211",
+            "JHRS_3", "JHRS_2", "JHRS_1",
+            "SJRS_3", "SJRS_2", "SJRS_1",
+            "XX_Med_3", "XX_Med_2", "XX_Med_1",
+            "ZY_Max_3", "ZY_Max_2", "ZY_Max_1",
+            "ZY_Min_3", "ZY_Min_2", "ZY_Min_1",
+            "CS", "NX", "YJ",
+        ]
+        self._check_columns(df_raw, required_cols)
+
+        df = df_raw.copy()
+        numeric_cols = [c for c in required_cols if c not in ["ZYMC", "SZD"]]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.dropna(axis=0).reset_index(drop=True)
+        df["XXCC"] = df["SFSYL"] + df["SF985"] + df["SF211"]
+        df["ZYMC"] = self.le_zymc.fit_transform(df["ZYMC"].astype(str))
+        df["SZD"] = self.le_szd.fit_transform(df["SZD"].astype(str))
+
+        if df.empty:
+            raise ValueError("清洗后数据为空，请检查原始数据质量。")
+        return df, df_raw
+
+    def run(self, csv_path: str) -> pd.DataFrame:
+        df, df_raw = self._prepare_data(csv_path)
+
+        base_features = [
+            "ZYMC", "SZD", "XXCC", "JHRS_3", "JHRS_2", "SJRS_3", "SJRS_2",
+            "XX_Med_3", "XX_Med_2", "ZY_Max_3", "ZY_Max_2", "ZY_Min_3", "ZY_Min_2",
+            "CS", "NX", "YJ",
+        ]
+
+        train_df, _ = train_test_split(df, train_size=0.7, random_state=self.seed, shuffle=True)
+        train_df = train_df.copy()
+
+        m1_features = base_features.copy()
+        self.model_1.fit(train_df[m1_features], train_df["JHRS_1"])
+        train_df["JHRS_1_hat"] = self.model_1.predict(train_df[m1_features])
+
+        m2_features = [
+            "ZYMC", "SZD", "XXCC", "JHRS_3", "JHRS_2", "JHRS_1_hat", "SJRS_3", "SJRS_2",
+            "XX_Med_3", "XX_Med_2", "ZY_Max_3", "ZY_Max_2", "ZY_Min_3", "ZY_Min_2",
+            "CS", "NX", "YJ",
+        ]
+        self.model_2.fit(train_df[m2_features], train_df["SJRS_1"])
+        train_df["SJRS_1_hat"] = self.model_2.predict(train_df[m2_features])
+
+        m345_features = [
+            "ZYMC", "SZD", "XXCC", "JHRS_3", "JHRS_2", "JHRS_1_hat", "SJRS_3", "SJRS_2", "SJRS_1_hat",
+            "XX_Med_3", "XX_Med_2", "ZY_Max_3", "ZY_Max_2", "ZY_Min_3", "ZY_Min_2",
+            "CS", "NX", "YJ",
+        ]
+
+        self.model_3.fit(train_df[m345_features], train_df["XX_Med_1"])
+        self.model_4.fit(train_df[m345_features], train_df["ZY_Max_1"])
+        self.model_5.fit(train_df[m345_features], train_df["ZY_Min_1"])
+
+        full_df = df.copy()
+        self.model_1.fit(full_df[m1_features], full_df["JHRS_1"])
+        full_df["JHRS_1_hat"] = self.model_1.predict(full_df[m1_features])
+        self.model_2.fit(full_df[m2_features], full_df["SJRS_1"])
+        full_df["SJRS_1_hat"] = self.model_2.predict(full_df[m2_features])
+        self.model_3.fit(full_df[m345_features], full_df["XX_Med_1"])
+        self.model_4.fit(full_df[m345_features], full_df["ZY_Max_1"])
+        self.model_5.fit(full_df[m345_features], full_df["ZY_Min_1"])
+
+        pred_df = full_df.copy()
+
+        m1_pred_input = pd.DataFrame({
+            "ZYMC": pred_df["ZYMC"], "SZD": pred_df["SZD"], "XXCC": pred_df["XXCC"],
+            "JHRS_3": pred_df["JHRS_2"], "JHRS_2": pred_df["JHRS_1"],
+            "SJRS_3": pred_df["SJRS_2"], "SJRS_2": pred_df["SJRS_1"],
+            "XX_Med_3": pred_df["XX_Med_2"], "XX_Med_2": pred_df["XX_Med_1"],
+            "ZY_Max_3": pred_df["ZY_Max_2"], "ZY_Max_2": pred_df["ZY_Max_1"],
+            "ZY_Min_3": pred_df["ZY_Min_2"], "ZY_Min_2": pred_df["ZY_Min_1"],
+            "CS": pred_df["CS"], "NX": pred_df["NX"], "YJ": pred_df["YJ"],
+        })
+        pred_df["JHRS_0"] = self.model_1.predict(m1_pred_input[m1_features])
+
+        m2_pred_input = pd.DataFrame({
+            "ZYMC": pred_df["ZYMC"], "SZD": pred_df["SZD"], "XXCC": pred_df["XXCC"],
+            "JHRS_3": pred_df["JHRS_2"], "JHRS_2": pred_df["JHRS_1"], "JHRS_1_hat": pred_df["JHRS_0"],
+            "SJRS_3": pred_df["SJRS_2"], "SJRS_2": pred_df["SJRS_1"],
+            "XX_Med_3": pred_df["XX_Med_2"], "XX_Med_2": pred_df["XX_Med_1"],
+            "ZY_Max_3": pred_df["ZY_Max_2"], "ZY_Max_2": pred_df["ZY_Max_1"],
+            "ZY_Min_3": pred_df["ZY_Min_2"], "ZY_Min_2": pred_df["ZY_Min_1"],
+            "CS": pred_df["CS"], "NX": pred_df["NX"], "YJ": pred_df["YJ"],
+        })
+        pred_df["SJRS_0"] = self.model_2.predict(m2_pred_input[m2_features])
+
+        m345_pred_input = pd.DataFrame({
+            "ZYMC": pred_df["ZYMC"], "SZD": pred_df["SZD"], "XXCC": pred_df["XXCC"],
+            "JHRS_3": pred_df["JHRS_2"], "JHRS_2": pred_df["JHRS_1"], "JHRS_1_hat": pred_df["JHRS_0"],
+            "SJRS_3": pred_df["SJRS_2"], "SJRS_2": pred_df["SJRS_1"], "SJRS_1_hat": pred_df["SJRS_0"],
+            "XX_Med_3": pred_df["XX_Med_2"], "XX_Med_2": pred_df["XX_Med_1"],
+            "ZY_Max_3": pred_df["ZY_Max_2"], "ZY_Max_2": pred_df["ZY_Max_1"],
+            "ZY_Min_3": pred_df["ZY_Min_2"], "ZY_Min_2": pred_df["ZY_Min_1"],
+            "CS": pred_df["CS"], "NX": pred_df["NX"], "YJ": pred_df["YJ"],
+        })
+        pred_df["XX_Med_0"] = self.model_3.predict(m345_pred_input[m345_features])
+        pred_df["ZY_Max_0"] = self.model_4.predict(m345_pred_input[m345_features])
+        pred_df["ZY_Min_0"] = self.model_5.predict(m345_pred_input[m345_features])
+
+        out_df = df_raw.loc[pred_df.index].copy().reset_index(drop=True)
+        out_df["JHRS_0"] = pred_df["JHRS_0"].values
+        out_df["SJRS_0"] = pred_df["SJRS_0"].values
+        out_df["XX_Med_0"] = pred_df["XX_Med_0"].values
+        out_df["ZY_Max_0"] = pred_df["ZY_Max_0"].values
+        out_df["ZY_Min_0"] = pred_df["ZY_Min_0"].values
+        return out_df
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 冲/稳/保算法
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 UNREACHABLE_THRESHOLD = 1.0
+BAO_PROB_THRESHOLD = 0.80
+STEADY_PROB_THRESHOLD = 0.55
+MIN_CHONG_DISPLAY_PROB = 0.20
+SIGMA_MODE = "neutral"
+SIGMA_MODE_FACTOR = {
+    "conservative": 0.80,
+    "neutral": 1.00,
+    "aggressive": 1.20,
+}
+
+
+def _normal_cdf(x: float, mu: float, sigma: float) -> float:
+    if sigma <= 0:
+        return 1.0 if x >= mu else 0.0
+    z = (x - mu) / (sigma * math.sqrt(2.0))
+    return 0.5 * (1.0 + math.erf(z))
+
+
+def _estimate_distribution_params(major_data: Dict[str, Any]) -> Tuple[float, float]:
+    low_rank = float(major_data.get('min_rank', 0) or 0)
+    median_rank = float(major_data.get('median_rank', 0) or 0)
+    high_rank = float(major_data.get('max_rank', 0) or 0)
+
+    valid_ranks = [rank for rank in (low_rank, median_rank, high_rank) if rank > 0]
+    if not valid_ranks:
+        return 1.0, 1.0
+
+    actual_best = min(valid_ranks)
+    actual_worst = max(valid_ranks)
+    mu = median_rank if median_rank > 0 else float(sum(valid_ranks) / len(valid_ranks))
+    sample_sigma = float(np.std(valid_ranks, ddof=0)) if len(valid_ranks) >= 2 else 0.0
+    sigma_from_range = (actual_worst - actual_best) / 3.0 if actual_worst > actual_best else 0.0
+    sigma_floor = max(mu * 0.08, 50.0)
+    sigma = max(sample_sigma, sigma_from_range, sigma_floor)
+    sigma *= SIGMA_MODE_FACTOR.get(SIGMA_MODE, 1.0)
+    return mu, sigma
+
+
+def _calculate_admission_probability(user_rank: int, major_data: Dict[str, Any]) -> float:
+    mu, sigma = _estimate_distribution_params(major_data)
+    cdf_value = _normal_cdf(float(user_rank), mu, sigma)
+    admit_prob = 1.0 - cdf_value
+    return min(max(admit_prob, 0.0), 1.0)
+
+
+def _tag_from_probability(prob: float) -> str:
+    if prob >= BAO_PROB_THRESHOLD:
+        return "保"
+    if prob >= STEADY_PROB_THRESHOLD:
+        return "稳"
+    return "冲"
+
+
+def _should_hide_result(tag: Optional[str], prob: float) -> bool:
+    return tag == "冲" and prob < MIN_CHONG_DISPLAY_PROB
+
+
+def is_unreachable(user_rank: Optional[int], major_data: Dict[str, Any]) -> bool:
+    if user_rank is None or user_rank <= 0:
+        return False
+    min_rank = major_data.get('min_rank', 0)
+    if min_rank <= 0:
+        return False
+    rank_diff = (user_rank - min_rank) / min_rank
+    return rank_diff > UNREACHABLE_THRESHOLD
+
+
+def should_recommend(user_rank: Optional[int], major_data: Dict[str, Any]) -> bool:
+    if is_unreachable(user_rank, major_data):
+        return False
+    if user_rank is None or user_rank <= 0:
+        return True
+    prob = _calculate_admission_probability(user_rank, major_data)
+    tag = _tag_from_probability(prob)
+    return not _should_hide_result(tag, prob)
 
 def calculate_tag_with_prob(user_rank, major_data):
-    if user_rank is None or user_rank <= 0: return "稳", 50
-    min_rank = major_data.get("min_rank", 0)
-    if min_rank <= 0: return "稳", 50
-    diff = (user_rank - min_rank) / min_rank
-    if diff > UNREACHABLE_THRESHOLD: return None, None
-    if diff >= 0.30: return "冲", 20
-    if diff >= 0.15: return "冲", 30
-    if diff >= 0:    return "冲", 40
-    if diff >= -0.10: return "稳", 60
-    if diff >= -0.15: return "稳", 75
-    if diff >= -0.30: return "保", 85
-    return "保", 95
+    if user_rank is None or user_rank <= 0:
+        return "稳", 50
+    if major_data.get('min_rank', 0) <= 0:
+        return "稳", 50
+    if is_unreachable(user_rank, major_data):
+        return None, None
+    prob = _calculate_admission_probability(user_rank, major_data)
+    tag = _tag_from_probability(prob)
+    prob_percent = int(round(prob * 100))
+    prob_percent = min(max(prob_percent, 1), 99)
+    return tag, prob_percent
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 数据初始化（懒加载，线程安全）
@@ -134,15 +304,12 @@ def init_data():
         else:
             # 回退：运行完整 ML 流程
             print("data.json 不存在，启动 ML 流程...")
-            df, _ = load_and_preprocess_data()
-            df = feature_engineering(df)
-            feats = lasso_feature_selection(df)
-            model = xgboost_prediction(df, feats)
-            df = predict_next_year(df, model, feats)
+            csv_path = os.path.join(PARENT_DIR, "专业录取分数统计表.csv")
+            df = RankForecastPipeline(seed=42).run(csv_path)
             for idx, row in df.iterrows():
-                min_r = int(round(row.get('ZY_Min_4', 0)))
-                max_r = int(round(row.get('ZY_Max_3', 0)))
-                med_r = int(round(row.get('XX_Med_3', 0)))
+                min_r = int(round(row.get('ZY_Min_0', 0)))
+                max_r = int(round(row.get('ZY_Max_0', 0)))
+                med_r = int(round(row.get('XX_Med_0', 0)))
                 vals = sorted([min_r, max_r, med_r], reverse=True)
                 ALL_MAJORS.append({
                     "id": int(idx), "region": str(row['SZD']), "major": str(row['ZYMC']),
@@ -212,11 +379,11 @@ def search():
     for m in ALL_MAJORS:
         if regions and m["region"] not in regions: continue
         if majors  and m["major"]  not in majors:  continue
+        if user_rank and not should_recommend(user_rank, m): continue
         if conditions and not _check_conditions(m, conditions, user_rank): continue
         item = dict(m)
         if user_rank:
             tag, prob = calculate_tag_with_prob(user_rank, m)
-            if tag is None: continue
             item["tag"] = tag; item["prob"] = prob
         else:
             item["tag"] = "稳"; item["prob"] = None
@@ -253,7 +420,8 @@ def _check_conditions(item, conditions, user_rank=None):
 def _apply_sort(data, sort_settings):
     keys = {"min_rank":lambda x:x.get("min_rank",0), "max_rank":lambda x:x.get("max_rank",0),
             "median_rank":lambda x:x.get("median_rank",0),
-            "region":lambda x:x.get("region",""), "major":lambda x:x.get("major","")}
+            "region":lambda x:x.get("region",""), "major":lambda x:x.get("major",""),
+            "prob":lambda x:x.get("prob", -1)}
     for s in reversed(sort_settings):
         f = s.get("field","min_rank")
         if f in keys: data.sort(key=keys[f], reverse=not s.get("ascending",True))
